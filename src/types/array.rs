@@ -8,7 +8,6 @@ use std::{
     fmt::Debug,
     iter::FromIterator,
     ptr::NonNull,
-    u64,
 };
 
 use crate::{
@@ -19,7 +18,7 @@ use crate::{
         _Bucket, _zend_new_array, zend_array_destroy, zend_array_dup, zend_hash_clean,
         zend_hash_index_del, zend_hash_index_find, zend_hash_index_update,
         zend_hash_next_index_insert, zend_hash_str_del, zend_hash_str_find, zend_hash_str_update,
-        HT_MIN_SIZE,
+        zend_ulong, HT_MIN_SIZE,
     },
     flags::DataType,
     types::Zval,
@@ -208,7 +207,7 @@ impl ZendHashTable {
     /// ht.push(100);
     /// assert_eq!(ht.get_index(0).and_then(|zv| zv.long()), Some(100));
     /// ```
-    pub fn get_index(&self, key: u64) -> Option<&Zval> {
+    pub fn get_index(&self, key: zend_ulong) -> Option<&Zval> {
         unsafe { zend_hash_index_find(self, key).as_ref() }
     }
 
@@ -271,7 +270,7 @@ impl ZendHashTable {
     /// ht.remove_index(0);
     /// assert_eq!(ht.len(), 0);
     /// ```
-    pub fn remove_index(&mut self, key: u64) -> Option<()> {
+    pub fn remove_index(&mut self, key: zend_ulong) -> Option<()> {
         let result = unsafe { zend_hash_index_del(self, key) };
 
         if result < 0 {
@@ -342,7 +341,7 @@ impl ZendHashTable {
     /// ht.insert_at_index(0, "C"); // notice overriding index 0
     /// assert_eq!(ht.len(), 2);
     /// ```
-    pub fn insert_at_index<V>(&mut self, key: u64, val: V) -> Result<()>
+    pub fn insert_at_index<V>(&mut self, key: zend_ulong, val: V) -> Result<()>
     where
         V: IntoZval,
     {
@@ -438,7 +437,7 @@ impl ZendHashTable {
         !self
             .iter()
             .enumerate()
-            .any(|(i, (k, strk, _))| i as u64 != k || strk.is_some())
+            .any(|(i, (k, strk, _))| i as zend_ulong != k || strk.is_some())
     }
 
     /// Returns an iterator over the key(s) and value contained inside the
@@ -547,7 +546,7 @@ impl<'a> Iter<'a> {
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = (u64, Option<String>, &'a Zval);
+    type Item = (zend_ulong, Option<String>, &'a Zval);
 
     fn next(&mut self) -> Option<Self::Item> {
         let pos = self.pos?;
@@ -811,8 +810,8 @@ impl FromIterator<Zval> for ZBox<ZendHashTable> {
     }
 }
 
-impl FromIterator<(u64, Zval)> for ZBox<ZendHashTable> {
-    fn from_iter<T: IntoIterator<Item = (u64, Zval)>>(iter: T) -> Self {
+impl FromIterator<(zend_ulong, Zval)> for ZBox<ZendHashTable> {
+    fn from_iter<T: IntoIterator<Item = (zend_ulong, Zval)>>(iter: T) -> Self {
         let mut ht = ZendHashTable::new();
         for (key, val) in iter.into_iter() {
             // Inserting a zval cannot fail, as `push` only returns `Err` if converting
