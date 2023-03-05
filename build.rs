@@ -20,13 +20,13 @@ const MAX_PHP_API_VER: u32 = 20220829;
 
 pub trait PHPProvider<'a>: Sized {
     /// Create a new PHP provider.
-    fn new(info: &'a PHPInfo) -> Result<Self>;
+    fn from_info(info: &'a PHPInfo) -> Result<Self>;
 
     /// Retrieve a list of absolute include paths.
     fn get_includes(&self) -> Result<Vec<PathBuf>>;
 
     /// Retrieve a list of macro definitions to pass to the compiler.
-    fn get_defines(&self) -> Result<Vec<(&'static str, &'static str)>>;
+    fn get_defines(&self) -> Result<Vec<(String, String)>>;
 
     /// Writes the bindings to a file.
     fn write_bindings(&self, bindings: String, writer: &mut impl Write) -> Result<()> {
@@ -75,11 +75,14 @@ fn find_php() -> Result<PathBuf> {
     })
 }
 
-pub struct PHPInfo(String);
+pub enum PHPInfo {
+    FromCommand(String),
+    FromEnv,
+}
 
 impl PHPInfo {
-    pub fn get(php: &Path) -> Result<Self> {
-        let cmd = Command::new(php)
+    pub fn from_command(php_path: &Path) -> Result<Self> {
+        let cmd = Command::new(php_path)
             .arg("-i")
             .output()
             .context("Failed to call `php -i`")?;
@@ -87,7 +90,11 @@ impl PHPInfo {
             bail!("Failed to call `php -i` status code {}", cmd.status);
         }
         let stdout = String::from_utf8_lossy(&cmd.stdout);
-        Ok(Self(stdout.to_string()))
+        Ok(Self::FromCommand(stdout.to_string()))
+    }
+
+    pub fn from_env() -> Result<Self> {
+        Ok(Self::FromEnv)
     }
 
     // Only present on Windows.
@@ -114,7 +121,7 @@ impl PHPInfo {
             == "yes")
     }
 
-    pub fn version(&self) -> Result<&str> {
+    pub fn version(&self) -> Result<String> {
         self.get_key("PHP Version")
             .context("Failed to get PHP version")
     }
@@ -122,26 +129,37 @@ impl PHPInfo {
     pub fn zend_version(&self) -> Result<u32> {
         self.get_key("PHP API")
             .context("Failed to get Zend version")
-            .and_then(|s| u32::from_str(s).context("Failed to convert Zend version to integer"))
+            .and_then(|s| {
+                u32::from_str(s.as_ref()).context("Failed to convert Zend version to integer")
+            })
     }
 
-    fn get_key(&self, key: &str) -> Option<&str> {
-        let split = format!("{key} => ");
-        for line in self.0.lines() {
-            let components: Vec<_> = line.split(&split).collect();
-            if components.len() > 1 {
-                return Some(components[1]);
+    fn get_key(&self, key: &str) -> Option<String> {
+        match self {
+            PHPInfo::FromCommand(command_output) => {
+                let split = format!("{key} => ");
+                for line in command_output.lines() {
+                    let components: Vec<_> = line.split(&split).collect();
+                    if components.len() > 1 {
+                        return Some(components[1].to_string());
+                    }
+                }
+                None
+            }
+            PHPInfo::FromEnv => {
+                let key = format!("PHP_{}", key.replace(" ", "_").to_uppercase());
+                println!("cargo:rerun-if-env-changed={key}");
+                env::var(key).ok()
             }
         }
-        None
     }
 }
 
 /// Builds the wrapper library.
-fn build_wrapper(defines: &[(&str, &str)], includes: &[PathBuf]) -> Result<()> {
+fn build_wrapper(defines: &[(String, String)], includes: &[PathBuf]) -> Result<()> {
     let mut build = cc::Build::new();
     for (var, val) in defines {
-        build.define(var, *val);
+        build.define(var, (*val).as_str());
     }
     build
         .file("src/wrapper.c")
@@ -152,7 +170,7 @@ fn build_wrapper(defines: &[(&str, &str)], includes: &[PathBuf]) -> Result<()> {
 }
 
 /// Generates bindings to the Zend API.
-fn generate_bindings(defines: &[(&str, &str)], includes: &[PathBuf]) -> Result<String> {
+fn generate_bindings(defines: &[(String, String)], includes: &[PathBuf]) -> Result<String> {
     let mut bindgen = bindgen::Builder::default()
         .header("src/wrapper.h")
         .clang_args(
@@ -232,7 +250,7 @@ fn main() -> Result<()> {
     ] {
         println!("cargo:rerun-if-changed={}", path.to_string_lossy());
     }
-    for env_var in ["PHP", "PHP_CONFIG", "PATH"] {
+    for env_var in ["PHP", "PHP_CONFIG", "PATH", "PHP_CONFIGURE_FROM_ENV"] {
         println!("cargo:rerun-if-env-changed={env_var}");
     }
 
@@ -248,9 +266,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let php = find_php()?;
-    let info = PHPInfo::get(&php)?;
-    let provider = Provider::new(&info)?;
+    let configure_build_from_env = env::var("PHP_CONFIGURE_FROM_ENV")
+        .ok()
+        .map_or(false, |from_env| from_env == "true");
+
+    let info = if configure_build_from_env {
+        PHPInfo::from_env()?
+    } else {
+        let php = find_php()?;
+        PHPInfo::from_command(&php)?
+    };
+
+    let provider = Provider::from_info(&info)?;
 
     let includes = provider.get_includes()?;
     let defines = provider.get_defines()?;

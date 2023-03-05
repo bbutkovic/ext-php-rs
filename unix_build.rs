@@ -1,12 +1,14 @@
 use std::{path::PathBuf, process::Command};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context, Error, Ok, Result};
 
 use crate::{find_executable, path_from_env, PHPInfo, PHPProvider};
 
-pub struct Provider {}
+pub struct Provider<'a> {
+    info: &'a PHPInfo,
+}
 
-impl Provider {
+impl<'a> Provider<'a> {
     /// Runs `php-config` with one argument, returning the stdout.
     fn php_config(&self, arg: &str) -> Result<String> {
         let cmd = Command::new(self.find_bin()?)
@@ -38,21 +40,52 @@ impl Provider {
     }
 }
 
-impl<'a> PHPProvider<'a> for Provider {
-    fn new(_: &'a PHPInfo) -> Result<Self> {
-        Ok(Self {})
+impl<'a> PHPProvider<'a> for Provider<'a> {
+    fn from_info(info: &'a PHPInfo) -> Result<Self> {
+        Ok(Self { info })
     }
 
     fn get_includes(&self) -> Result<Vec<PathBuf>> {
-        Ok(self
-            .php_config("--includes")?
-            .split(' ')
-            .map(|s| s.trim_start_matches("-I"))
-            .map(PathBuf::from)
-            .collect())
+        match self.info {
+            PHPInfo::FromCommand(_) => Ok(self
+                .php_config("--includes")?
+                .split(' ')
+                .map(|s| s.trim_start_matches("-I"))
+                .map(PathBuf::from)
+                .collect()),
+            PHPInfo::FromEnv => self
+                .info
+                .get_key("includes")
+                .map(|includes| {
+                    includes
+                        .as_str()
+                        .split(",")
+                        .map(|include| PathBuf::from(include))
+                        .collect()
+                })
+                .ok_or(Error::msg("could not find includes in env")),
+        }
     }
 
-    fn get_defines(&self) -> Result<Vec<(&'static str, &'static str)>> {
-        Ok(vec![])
+    fn get_defines(&self) -> Result<Vec<(String, String)>> {
+        Ok(match self.info {
+            PHPInfo::FromEnv => self
+                .info
+                .get_key("defines")
+                .map(|defines| {
+                    defines
+                        .as_str()
+                        .split(",")
+                        .map(|define| {
+                            define
+                                .split_once("=")
+                                .map(|(define, value)| (define.to_string(), value.to_string()))
+                                .unwrap_or_else(|| (define.to_string(), "1".to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or(vec![]),
+            _ => vec![],
+        })
     }
 }
